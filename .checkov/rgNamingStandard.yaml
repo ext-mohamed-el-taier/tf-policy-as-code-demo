@@ -1,0 +1,14 @@
+---
+metadata:
+  name: "Check that all resource groups start with rg- prefix."
+  id: "CKV2_AZURERM_1"
+  category: "CONVENTION"
+  severity: "HIGH"
+
+definition:
+  cond_type: "attribute"
+  resource_types: 
+    - "azurerm_resource_group"
+  attribute: "name"
+  operator: "starting_with"
+  value: "rg-"

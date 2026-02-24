@@ -1,0 +1,15 @@
+checks:
+- code: TAG001
+  description: Custom check to ensure the CostCentre tag is applied to Azure Resource Group
+  impact: By not having CostCentre we can't keep track of billing
+  resolution: Add the CostCentre tag
+  requiredTypes:
+  - resource
+  requiredLabels:
+  - azurerm_resource_group
+  severity: ERROR
+  matchSpec:
+    name: tags
+    action: contains
+    value: CostCentre
+  errorMessage: The required CostCentre tag was missing

@@ -1,0 +1,289 @@
+run-name: tfdeployment-${{ inputs.Subscription }}-${{ inputs.Context }}-${{ inputs.Environment }}
+name: Terraform Deployment Pipeline Template Sample
+permissions:
+      id-token: write
+      contents: read
+      
+on:
+  workflow_dispatch:
+    inputs:
+
+
+      Subscription:
+        description: 'Subscription Folder'
+        required: true
+        default: 'sub-name-001'
+        type: choice
+        options:
+          - 'sub-name-001'
+          - 'sub-name-002'
+          - 'sub-sandbox-meltaierorg'
+
+
+      Context:
+        description: 'Application Folder'
+        required: true
+        default: 'appName'
+        type: choice
+        options:
+          - 'appName'
+
+      Environment:
+        description: 'Github Environment used for deployment, also needs to match repo folder name wherethe terraform files are kept'
+        required: true
+        default: 'sbx'
+        type: choice
+        options:
+          - 'sbx'          
+      
+      Options:
+        description: 'Pipeline Options'
+        required: true
+        default: 'Plan and Apply'
+        type: choice
+        options:
+          - 'Plan and Apply'
+          - 'Plan only'
+
+
+
+
+env:
+  location: 'australiaeast'
+  runNumber: ${{ github.run_number }}
+
+jobs:
+  runCodeChecks:
+    name: IaC Code Linting and Static Code Analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3 
+
+      - name: Run Terraform Fmt 
+        run: |
+             echo "Running terraform format"
+             terraform fmt -check -write=false src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }} # Run terraform fmt on the specific directory
+
+      - name: Install tfsec from Official Repo
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+      - name: Install tflint from Official Repo
+        run: |
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      - name: Install required packages on GitHub runner via apt
+        run: |
+
+          echo "Updating APT and installing required packages..."
+
+          sudo apt update && sudo apt upgrade -y
+
+          sudo apt install --no-install-recommends -y \
+            apt-transport-https \
+            apt-utils \
+            build-essential \
+            curl \
+            wget \
+            git \
+            gnupg \
+            gpg \
+            python3-crcmod \
+            python3-dev \
+            python3-pip \
+            python3-virtualenv \
+            shellcheck \
+            unzip \
+            zip \
+
+          sudo apt autoremove --purge -y
+
+          echo "Environment is ready!"
+
+      - name: Install Checkov & YAML Lint
+        run: |
+          pip3 install --upgrade pip && pip3 install --upgrade setuptools
+          pip3 install checkov
+          pip3 install yamllint
+
+      - name: Run TF Sec
+        shell: bash
+        run: |
+              echo "printing current directory \n" 
+              pwd
+              echo "listing files in current directory \n" 
+              ls
+              echo "Running TF Sec \n"
+              tfsec src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}  --tfvars-file src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}/params.auto.tfvars --custom-check-dir .tfsec --verbose
+
+
+      - name: Run TF Lint
+        shell: bash
+        run: |
+          echo "Running TF Lint"
+          tflint --chdir=src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+
+      - name: Run TF Checkov
+        shell: bash
+        run: |
+          echo "Running TF Checkov"
+          checkov --directory src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }} --external-checks-dir .checkov --var-file=src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}/params.auto.tfvars
+
+  validate:
+    runs-on: ubuntu-24.04
+    needs: runCodeChecks
+    if: ${{ inputs.Options == 'Plan and Apply' || inputs.Options == 'Plan only' }}
+    steps:
+      # Checkout Repo
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3 
+
+      # Login using OIDC Creds
+      - name: OIDC Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          subscription-id: ${{ secrets.DEFAULT_SUBSCRIPTION_ID }} 
+          enable-AzPSSession: true
+
+      # Terraform Validate 
+      - name: Run Terraform validate for src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+        run: |
+            echo "Running Validation"
+
+            echo "Setting Azure Context Subscription to ${{ inputs.Subscription }}"
+            az account set --subscription ${{ inputs.Subscription }}
+
+            az account show --query name -o tsv
+
+            echo "Changing Directory to src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}"
+            cd src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+            
+            echo "Initializing Terraform directory using Terraform init"
+            terraform init \
+            -backend-config="storage_account_name=${{ vars.BACKEND_STORAGE_ACCOUNT_NAME }}" \
+            -backend-config="container_name=${{ vars.BACKEND_STORAGE_CONTAINER_NAME }}" \
+            -backend-config="key=${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}/terra.tfstate"
+
+            echo "Running Terraform validate"
+            terraform validate
+
+  plan:
+    runs-on: ubuntu-24.04
+    needs: validate
+    if: ${{ inputs.Options == 'Plan and Apply' || inputs.Options == 'Plan only' }}
+    steps:
+      # Checkout Repo
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3 
+
+      # Login using OIDC Creds
+      - name: OIDC Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          subscription-id: ${{ secrets.DEFAULT_SUBSCRIPTION_ID }} 
+          enable-AzPSSession: true
+
+      # Terraform Plan 
+      - name: Run Terraform plan for src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+        run: |
+            echo "Running Plan"
+
+            echo "Setting Azure Context Subscription to ${{ inputs.Subscription }}"
+            az account set --subscription ${{ inputs.Subscription }}
+
+            az account show --query name -o tsv
+
+            echo "Changing Directory to src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}"
+            cd src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+            
+            echo "Initializing Terraform directory using Terraform init"
+            terraform init \
+            -backend-config="storage_account_name=${{ vars.BACKEND_STORAGE_ACCOUNT_NAME }}" \
+            -backend-config="container_name=${{ vars.BACKEND_STORAGE_CONTAINER_NAME }}" \
+            -backend-config="key=${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}/terra.tfstate"
+
+            echo "Running Terraform plan"
+            terraform plan -out=${{ inputs.Subscription }}-${{ inputs.Context }}-${{ inputs.Environment }}.tfplan
+
+      - name: Upload Terraform Plan artifact for src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}/${{ inputs.Subscription }}-${{ inputs.Context }}-${{ inputs.Environment }}.tfplan
+
+
+  apply:
+    runs-on: ubuntu-24.04
+    needs: [runCodeChecks,plan,validate]
+    environment: ${{inputs.Environment}}
+    if: ${{ inputs.Options == 'Plan and Apply'}}
+    steps:
+      # Checkout Repo
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3 
+
+      # Login using OIDC Creds
+      - name: OIDC Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          subscription-id: ${{ secrets.DEFAULT_SUBSCRIPTION_ID }} 
+          enable-AzPSSession: true
+
+      - name: Download Terraform Plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+
+      # Terraform Apply
+      - name: Run Terraform Apply for src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+        run: |
+            echo "Running Apply"
+
+            echo "Setting Azure Context Subscription to ${{ inputs.Subscription }}"
+            az account set --subscription ${{ inputs.Subscription }}
+
+            az account show --query name -o tsv
+
+            echo "Changing Directory to src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}"
+            cd src/${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}
+            
+            echo "Initializing Terraform directory using Terraform init"
+            terraform init \
+            -backend-config="storage_account_name=${{ vars.BACKEND_STORAGE_ACCOUNT_NAME }}" \
+            -backend-config="container_name=${{ vars.BACKEND_STORAGE_CONTAINER_NAME }}" \
+            -backend-config="key=${{ inputs.Subscription }}/${{ inputs.Context }}/${{ inputs.Environment }}/terra.tfstate"
+
+            echo "Running Terraform apply"
+            terraform apply -input=false ${{ inputs.Subscription }}-${{ inputs.Context }}-${{ inputs.Environment }}.tfplan 
+      
